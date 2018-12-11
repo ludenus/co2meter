@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"syscall"
@@ -70,7 +72,7 @@ func readData(source *os.File) []byte {
 		case CO2METER_CO2:
 			log.Printf("co2(ppm):%v", val)
 		case CO2METER_TEMP:
-			t := (float32)(val)/16.0 - 273.15
+			t := roundFmt(((float64)(val)/16.0 - 273.15), 0.1, "%.1f")
 			log.Printf("temp(c) :%v", t)
 		case CO2METER_HUM:
 			log.Printf("hum (%)%v", val)
@@ -80,6 +82,10 @@ func readData(source *os.File) []byte {
 	}
 
 	return decrypted
+}
+
+func roundFmt(x, unit float64, format string) string {
+	return fmt.Sprintf(format, math.Round(x/unit)*unit)
 }
 
 func decrypt(data []byte) []byte {
