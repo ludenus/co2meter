@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	// "unsafe"
 )
 
 var (
@@ -33,15 +34,31 @@ func readLoop(deviceName string, periodSeconds int) {
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 
 	source, err := os.Open(deviceName)
+	// source, err := os.OpenFile(deviceName, os.O_APPEND, 0660)
+	//source, err := os.OpenFile(deviceName, os.O_RDWR, 0660)
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// log.Printf("before ioctl %v", key)
+	// // https://gist.github.com/tetsu-koba/33b339d26ac9c730fb09773acf39eac5
+	// _, _, errno := syscall.Syscall(
+	// 	syscall.SYS_IOCTL,
+	// 	uintptr(source.Fd()),
+	// 	uintptr(HIDIOCSFEATURE_9),
+	// 	uintptr(unsafe.Pointer(&key)),
+	// )
+	// if errno != 0 {
+	// 	log.Printf("%v", errno)
+	// }
+	// log.Printf("after  ioctl %v", key)
+
 	defer source.Close()
 
 	for {
 		select {
 		case <-readTick:
-			readData(source)
+			readMeasurements(source)
 		case s := <-sigs:
 			log.Printf("received signal: %s\n", s)
 			return
@@ -49,7 +66,7 @@ func readLoop(deviceName string, periodSeconds int) {
 	}
 }
 
-func readData(source *os.File) []byte {
+func readData(source *os.File) *Measurements {
 	// https://www.devdungeon.com/content/working-files-go#everything_is_a_file
 
 	buffer := make([]byte, 8)
@@ -57,41 +74,97 @@ func readData(source *os.File) []byte {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// log.Printf("hex: %s\n", hex.Dump(buffer))
 
 	decrypted := decrypt(buffer)
-	// log.Printf("hex: %s", hex.Dump(decrypted))
+	result := parseData(decrypted)
+	return result
+}
 
+func isChecksumOk(decrypted []byte) bool {
 	if decrypted[4] != 0x0d || ((decrypted[0]+decrypted[1]+decrypted[2])&0xff) != decrypted[3] {
-		log.Printf("ERROR: checksum mismatch: %s => %s", hex.Dump(buffer), hex.Dump(decrypted))
+		return true
+	}
+	return false
+}
+
+type Measurements struct {
+	Temperature string `json:"temp"`
+	Co2         string `json:"co2"`
+}
+
+func (m *Measurements) hasTemp() bool {
+	if len(m.Temperature) > 0 {
+		return true
+	}
+	return false
+}
+
+func (m *Measurements) hasCo2() bool {
+	if len(m.Co2) > 0 {
+		return true
+	}
+	return false
+}
+
+func (m *Measurements) updateWith(src *Measurements) *Measurements {
+	if src.hasTemp() {
+		m.Temperature = src.Temperature
+	}
+	if src.hasCo2() {
+		m.Co2 = src.Co2
+	}
+	return m
+}
+
+func parseData(decrypted []byte) *Measurements {
+	result := Measurements{
+		Temperature: "",
+		Co2:         "",
+	}
+	if isChecksumOk(decrypted) {
+		log.Printf("ERROR: checksum mismatch: %s", hex.Dump(decrypted))
 	} else {
 		operation := decrypted[0]
 		val := ((int)(decrypted[1]) << 8) | (int)(decrypted[2])
 		//self._values[operation] = val
 		switch operation {
 		case CO2METER_CO2:
-			log.Printf("co2(ppm):%v", val)
+			result.Co2 = fmt.Sprintf("%v", val)
 		case CO2METER_TEMP:
-			t := roundFmt(((float64)(val)/16.0 - 273.15), 0.1, "%.1f")
-			log.Printf("temp(c) :%v", t)
+			result.Temperature = roundFmt(((float64)(val)/16.0 - 273.15), 0.1, "%.1f")
 		case CO2METER_HUM:
 			log.Printf("hum (%)%v", val)
 		default:
-			//log.Printf("ERROR operation not recognized %x, %v", operation, val)
+			// log.Printf("ERROR operation not recognized %x, %v", operation, val)
 		}
 	}
+	return &result
+}
 
-	return decrypted
+func readMeasurements(source *os.File) *Measurements {
+	result := Measurements{
+		Temperature: "",
+		Co2:         "",
+	}
+	for !(result.hasTemp() && result.hasCo2()) {
+		result.updateWith(readData(source))
+	}
+	log.Printf(" %v", result)
+	return &result
+}
+
+func round(x, unit float64) float64 {
+	return math.Round(x/unit) * unit
 }
 
 func roundFmt(x, unit float64, format string) string {
-	return fmt.Sprintf(format, math.Round(x/unit)*unit)
+	return fmt.Sprintf(format, round(x, unit))
 }
 
 func decrypt(data []byte) []byte {
-	key := []byte{0xc4, 0xc6, 0xc0, 0x92, 0x40, 0x23, 0xdc, 0x96}
-	cstate := []byte{0x48, 0x74, 0x65, 0x6D, 0x70, 0x39, 0x39, 0x65}
-	shuffle := []byte{2, 4, 0, 7, 1, 6, 5, 3}
+	var key = []byte{0xc4, 0xc6, 0xc0, 0x92, 0x40, 0x23, 0xdc, 0x96}
+	var cstate = []byte{0x48, 0x74, 0x65, 0x6D, 0x70, 0x39, 0x39, 0x65}
+	var shuffle = []byte{2, 4, 0, 7, 1, 6, 5, 3}
 
 	phase1 := []byte{0, 0, 0, 0, 0, 0, 0, 0}
 	for i, j := range shuffle {
@@ -125,7 +198,7 @@ func main() {
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	deviceName := "/dev/hidraw1"
+	deviceName := "/dev/hidraw3"
 	intervalSeconds := 1
 
 	readLoop(deviceName, intervalSeconds)
