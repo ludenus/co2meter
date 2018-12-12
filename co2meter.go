@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -58,7 +59,7 @@ func readLoop(deviceName string, periodSeconds int) {
 	for {
 		select {
 		case <-readTick:
-			readMeasurements(source)
+			fmt.Println(string(readMeasurements(source).json()))
 		case s := <-sigs:
 			log.Printf("received signal: %s\n", s)
 			return
@@ -90,6 +91,14 @@ func isChecksumOk(decrypted []byte) bool {
 type Measurements struct {
 	Temperature string `json:"temp"`
 	Co2         string `json:"co2"`
+}
+
+func (m *Measurements) json() []byte {
+	bytes, err := json.Marshal(m)
+	if err != nil {
+		log.Println(err)
+	}
+	return bytes
 }
 
 func (m *Measurements) hasTemp() bool {
@@ -149,7 +158,7 @@ func readMeasurements(source *os.File) *Measurements {
 	for !(result.hasTemp() && result.hasCo2()) {
 		result.updateWith(readData(source))
 	}
-	log.Printf(" %v", result)
+	// fmt.Printf("%v\n", result)
 	return &result
 }
 
@@ -193,16 +202,17 @@ func decrypt(data []byte) []byte {
 	return out
 }
 
-func main() {
-	// https://github.com/heinemml/CO2Meter
+func deviceName() string {
+	if len(os.Args) <= 1 {
+		log.Fatal("ERROR: device name not specified\nUSAGE: co2meter /dev/hidraw[0-9]")
+	}
+	return os.Args[1]
+}
 
+func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	deviceName := "/dev/hidraw3"
-	intervalSeconds := 1
-
+	deviceName := deviceName()
+	intervalSeconds := 5
 	readLoop(deviceName, intervalSeconds)
-
-	log.Printf("done.\n")
-
 }
